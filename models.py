@@ -29,7 +29,9 @@ class Interview(db.Model):
     confidence_score = db.Column(db.Float, default=0.0)
     stress_level = db.Column(db.Float, default=0.0)
     engagement_score = db.Column(db.Float, default=0.0)
+    status = db.Column(db.String(20), default='pending')  # pending, in_progress, completed
     feedback = db.Column(db.Text)
+    current_question = db.Column(db.Integer, default=0)  # Track current question number
     responses = db.relationship('InterviewResponse', backref='interview', lazy=True)
 
     @property
@@ -60,6 +62,8 @@ class Question(db.Model):
     content = db.Column(db.Text, nullable=False)
     category = db.Column(db.String(50))
     keywords = db.Column(db.Text)
+    video_path = db.Column(db.String(200))  # Path to the question video
+    question_order = db.Column(db.Integer)  # Order of questions in the interview
     follow_up_questions = db.relationship('Question',
                                         secondary='question_follow_ups',
                                         primaryjoin='Question.id==QuestionFollowUps.question_id',
@@ -80,4 +84,6 @@ class InterviewerAvatar(db.Model):
     model_path = db.Column(db.String(200))
     personality = db.Column(db.String(50))
     voice_id = db.Column(db.String(50))
+    specialization = db.Column(db.String(50))
+    description = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
