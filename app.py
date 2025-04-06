@@ -1,37 +1,240 @@
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_wtf import FlaskForm
+from wtforms import SelectField, SubmitField
+from wtforms.validators import DataRequired
+from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import os
-import secrets
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_file
-from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
-from models import db, User, Interview, InterviewerAvatar, Question, InterviewResponse
-from facial_analysis import FacialExpressionAnalyzer
-from sqlalchemy import func
-import json
-import cv2
-import numpy as np
-import base64
-from functools import wraps
-from flask_wtf import FlaskForm
-from wtforms import StringField, SelectField, IntegerField, SubmitField
-from wtforms.validators import InputRequired as DataRequired, ValidationError
-from flask_wtf.csrf import CSRFProtect
+import random
 
-# Simple auth decorator
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            flash('Please log in to access this page.', 'info')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
+# Initialize Flask app
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///interview.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = os.path.join('static', 'videos')
+
+# Initialize SQLAlchemy
+db = SQLAlchemy(app)
+
+# Custom Jinja2 filters
+@app.template_filter('avg')
+def avg_filter(lst, attribute=None):
+    if not lst:
+        return 0
+    if attribute:
+        lst = [getattr(x, attribute) for x in lst]
+    return sum(lst) / len(lst)
+
+# User model
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+
+# Question model
+class Question(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    content = db.Column(db.Text, nullable=False)
+    topic = db.Column(db.String(100), nullable=False)
+    difficulty = db.Column(db.String(20), nullable=False)
+
+# Interviewer model
+class Interviewer(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    personality = db.Column(db.String(50), nullable=False)
+    specialization = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    model_path = db.Column(db.String(200), nullable=False)
+
+# Interview model
+class Interview(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    interviewer_id = db.Column(db.Integer, db.ForeignKey('interviewer.id'), nullable=False)
+    topic = db.Column(db.String(100), nullable=False)
+    difficulty = db.Column(db.String(20), nullable=False)
+    start_time = db.Column(db.DateTime, nullable=False)
+    duration = db.Column(db.Float, default=0)  # in hours
+    confidence_score = db.Column(db.Float, default=0)  # 0 to 1
+
+    # Relationships
+    user = db.relationship('User', backref='interviews')
+    interviewer = db.relationship('Interviewer', backref='interviews')
+
+# Create tables and initial data
+with app.app_context():
+    # Drop all tables and recreate them
+    db.drop_all()
+    db.create_all()
+    
+    # Add default interviewers if none exist
+    if not Interviewer.query.first():
+        interviewers = [
+            {
+                'name': 'Dr. Alex Kumar',
+                'personality': 'analytical',
+                'specialization': 'data_structures_algorithms',
+                'description': 'Algorithm Specialist with 10+ years at top tech companies',
+                'model_path': 'interviewers/dsa_expert.jpg'
+            },
+            {
+                'name': 'Emily Chen',
+                'personality': 'systematic',
+                'specialization': 'system_design',
+                'description': 'Senior Software Engineer specializing in system architecture',
+                'model_path': 'interviewers/system_design.jpg'
+            },
+            {
+                'name': 'Sarah Wilson',
+                'personality': 'empathetic',
+                'specialization': 'behavioral',
+                'description': 'HR Director with expertise in behavioral interviews',
+                'model_path': 'interviewers/behavioral.jpg'
+            },
+            {
+                'name': 'Dr. James Miller',
+                'personality': 'analytical',
+                'specialization': 'aptitude',
+                'description': 'Mathematics Professor specializing in problem-solving',
+                'model_path': 'interviewers/aptitude.jpg'
+            }
+        ]
+        
+        for interviewer_data in interviewers:
+            interviewer = Interviewer(**interviewer_data)
+            db.session.add(interviewer)
+        
+        db.session.commit()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        
+        if user and check_password_hash(user.password, password):
+            session['user_id'] = user.id
+            return redirect(url_for('dashboard'))
+        flash('Invalid username or password')
+    return render_template('login.html')
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        if User.query.filter_by(username=username).first():
+            flash('Username already exists')
+            return redirect(url_for('signup'))
+            
+        user = User(username=username, password=generate_password_hash(password))
+        db.session.add(user)
+        db.session.commit()
+        
+        session['user_id'] = user.id
+        return redirect(url_for('dashboard'))
+    return render_template('signup.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user_id', None)
+    return redirect(url_for('index'))
+
+@app.route('/dashboard')
+def dashboard():
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+    return render_template('dashboard.html')
+
+@app.route('/contact', methods=['GET', 'POST'])
+def contact():
+    if request.method == 'POST':
+        name = request.form.get('name')
+        email = request.form.get('email')
+        message = request.form.get('message')
+        # TODO: Handle contact form submission
+        flash('Thank you for your message. We will get back to you soon!')
+        return redirect(url_for('contact'))
+    return render_template('contact.html')
+
+class InterviewForm(FlaskForm):
+    topic = SelectField('Select Topic', validators=[DataRequired()], choices=[
+        ('data_structures_algorithms', 'Data Structures & Algorithms'),
+        ('system_design', 'System Design'),
+        ('behavioral', 'Behavioral'),
+        ('aptitude', 'Aptitude')
+    ])
+    difficulty = SelectField('Select Difficulty', validators=[DataRequired()], choices=[
+        ('easy', 'Easy'),
+        ('medium', 'Medium'),
+        ('hard', 'Hard')
+    ])
+    num_interviewers = SelectField('Number of Interviewers', validators=[DataRequired()], choices=[
+        ('1', '1 Interviewer'),
+        ('2', '2 Interviewers'),
+        ('3', '3 Interviewers')
+    ])
+    submit = SubmitField('Start Interview')
+
+@app.route('/start-interview', methods=['GET', 'POST'])
+def start_interview():
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+    
+    form = InterviewForm()
+    # Get interviewers for the selected topic
+    interviewers = Interviewer.query.filter_by(specialization=form.topic.data).all()
+    if not interviewers:
+        # If no specialized interviewer found, get any interviewer
+        interviewers = Interviewer.query.all()
+    
+    if form.validate_on_submit():
+        # Select a random interviewer
+        interviewer = random.choice(interviewers)
+        
+        # Create a new interview session
+        interview = Interview(
+            user_id=session['user_id'],
+            interviewer_id=interviewer.id,
+            topic=form.topic.data,
+            difficulty=form.difficulty.data,
+            start_time=datetime.now(),
+            duration=0,
+            confidence_score=0
+        )
+        db.session.add(interview)
+        db.session.commit()
+        
+        return redirect(url_for('interview_room', interview_id=interview.id))
+    
+    return render_template('start_interview.html', form=form)
+
+@app.route('/interview-room/<int:interview_id>')
+def interview_room(interview_id):
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+        
+    interview = Interview.query.get_or_404(interview_id)
+    if interview.user_id != session['user_id']:
+        flash('Unauthorized access')
+        return redirect(url_for('dashboard'))
+        
+    return render_template('interview_room.html', interview=interview, interviewer=interview.interviewer)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+def allowed_video_file(filename):
+    ALLOWED_EXTENSIONS = {'mp4', 'webm', 'mov'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # Initialize CSRF protection
 csrf = CSRFProtect(app)
@@ -45,6 +248,15 @@ with app.app_context():
 # Initialize facial analyzer
 from facial_analysis import FacialExpressionAnalyzer
 facial_analyzer = FacialExpressionAnalyzer()
+
+# Initialize Flask-Login
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
 
 # Add session to template context
 @app.context_processor
@@ -335,19 +547,89 @@ class InterviewForm(FlaskForm):
 def index():
     return render_template('index.html')
 
+@app.route('/about')
+def about():
+    return render_template('about.html')
+
+@app.route('/contact', methods=['GET', 'POST'])
+def contact():
+    if request.method == 'POST':
+        name = request.form.get('name')
+        email = request.form.get('email')
+        subject = request.form.get('subject')
+        message = request.form.get('message')
+        
+        # Here you would typically save the contact form data or send an email
+        # For now, we'll just show a success message
+        flash('Thank you for your message! We will get back to you soon.', 'success')
+        return redirect(url_for('contact'))
+    
+    return render_template('contact.html')
+
+@app.route('/dashboard')
+def dashboard():
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+    return render_template('dashboard.html')
+
+@app.route('/upload-video', methods=['GET', 'POST'])
+def upload_video():
+    if not session.get('user_id'):
+        return redirect(url_for('login'))
+    
+    if request.method == 'POST':
+        if 'video' not in request.files:
+            flash('No video file uploaded', 'error')
+            return redirect(request.url)
+            
+        video = request.files['video']
+        question_id = request.form.get('question_id')
+        
+        if video.filename == '':
+            flash('No video selected', 'error')
+            return redirect(request.url)
+            
+        if not question_id:
+            flash('Please select a question', 'error')
+            return redirect(request.url)
+            
+        if video and allowed_video_file(video.filename):
+            filename = secure_filename(video.filename)
+            video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            video.save(video_path)
+            
+            # Save video details to database
+            video_url = url_for('static', filename=f'uploads/{filename}')
+            new_video = InterviewVideo(
+                user_id=session['user_id'],
+                question_id=question_id,
+                video_url=video_url
+            )
+            db.session.add(new_video)
+            db.session.commit()
+            
+            flash('Video uploaded successfully!', 'success')
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid video format. Supported formats: MP4, WebM, MOV', 'error')
+            return redirect(request.url)
+    
+    # GET request - show upload form
+    questions = Question.query.all()
+    return render_template('upload_video.html', questions=questions)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        
-        user = User.query.filter_by(username=username).first()
-        if user and check_password_hash(user.password_hash, password):
-            session['user_id'] = user.id
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and user.password == password:
+            login_user(user)
             flash('Logged in successfully!', 'success')
             return redirect(url_for('dashboard'))
-        
-        flash('Invalid username or password', 'error')
+        else:
+            flash('Invalid email or password', 'error')
     return render_template('login.html')
 
 @app.route('/signup', methods=['GET', 'POST'])
@@ -388,7 +670,7 @@ def signup():
 
 @app.route('/logout')
 def logout():
-    session.pop('user_id', None)
+    logout_user()
     flash('Logged out successfully!', 'success')
     return redirect(url_for('index'))
 
@@ -844,27 +1126,49 @@ def add_question():
             flash('All fields are required', 'error')
             return redirect(url_for('add_question'))
         
-        # Save video
-        interviewer_videos_dir = os.path.join('static', 'interviewer_videos')
-        os.makedirs(interviewer_videos_dir, exist_ok=True)
-        filename = f"interviewer_{secure_filename(video.filename)}"
-        video_path = os.path.join(interviewer_videos_dir, filename)
-        video.save(video_path)
-        
-        # Create question
-        question = Question(
-            topic=topic,
-            difficulty=difficulty,
-            content=content,
-            category=category,
-            interviewer_video_path=os.path.join('interviewer_videos', filename)
-        )
-        
-        db.session.add(question)
-        db.session.commit()
-        
-        flash('Question added successfully', 'success')
-        return redirect(url_for('manage_questions'))
+        if video and video.filename:
+            # Check if filename is secure
+            if not secure_filename(video.filename):
+                flash('Invalid video filename', 'error')
+                return redirect(url_for('add_question'))
+            
+            # Create directory if it doesn't exist
+            interviewer_videos_dir = os.path.join('static', 'interviewer_videos')
+            os.makedirs(interviewer_videos_dir, exist_ok=True)
+            
+            # Generate unique filename
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'interviewer_{timestamp}_{secure_filename(video.filename)}'
+            video_path = os.path.join(interviewer_videos_dir, filename)
+            
+            try:
+                # Save the video file
+                video.save(video_path)
+                
+                # Create question with video path
+                question = Question(
+                    topic=topic,
+                    difficulty=difficulty,
+                    content=content,
+                    category=category,
+                    interviewer_video_path=os.path.join('interviewer_videos', filename)
+                )
+                
+                db.session.add(question)
+                db.session.commit()
+                
+                flash('Question added successfully with video', 'success')
+                return redirect(url_for('manage_questions'))
+                
+            except Exception as e:
+                # Clean up video file if it was saved
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                flash(f'Error saving video: {str(e)}', 'error')
+                return redirect(url_for('add_question'))
+        else:
+            flash('Please upload a video file', 'error')
+            return redirect(url_for('add_question'))
     
     return render_template('add_question.html')
 
