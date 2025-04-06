@@ -3,6 +3,7 @@ import os
 import secrets
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from models import db, User, Interview, InterviewerAvatar, Question, InterviewResponse
 from facial_analysis import FacialExpressionAnalyzer
 from sqlalchemy import func
@@ -13,7 +14,8 @@ import base64
 from functools import wraps
 from flask_wtf import FlaskForm
 from wtforms import StringField, SelectField, IntegerField, SubmitField
-from wtforms.validators import InputRequired as DataRequired
+from wtforms.validators import InputRequired as DataRequired, ValidationError
+from flask_wtf.csrf import CSRFProtect
 
 # Simple auth decorator
 def login_required(f):
@@ -27,14 +29,21 @@ def login_required(f):
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///interview.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['WTF_CSRF_ENABLED'] = False  # Disable CSRF
+app.config['UPLOAD_FOLDER'] = os.path.join('static', 'videos')
 
-# Initialize extensions
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
+
+# Initialize database
 db.init_app(app)
 
+with app.app_context():
+    db.create_all()
+
 # Initialize facial analyzer
+from facial_analysis import FacialExpressionAnalyzer
 facial_analyzer = FacialExpressionAnalyzer()
 
 # Add session to template context
@@ -49,85 +58,279 @@ def inject_year():
 
 # Create all tables and initial data
 with app.app_context():
+    db.drop_all()
     db.create_all()
-    print("Database tables created")
     
-    # Add test questions if they don't exist
-    if Question.query.count() == 0:
-        print("Adding test questions...")
-        test_questions = [
-            Question(
-                topic='technology',
-                difficulty='beginner',
-                content='Tell me about your experience with Python programming.',
-                category='technical',
-                keywords='python, programming, experience',
-                video_path='static/videos/tech_beginner_1.mp4',
-                question_order=1
-            ),
-            Question(
-                topic='technology',
-                difficulty='beginner',
-                content='What are the key differences between Python 2 and Python 3?',
-                category='technical',
-                keywords='python2, python3, differences',
-                video_path='static/videos/tech_beginner_2.mp4',
-                question_order=2
-            ),
-            Question(
-                topic='technology',
-                difficulty='beginner',
-                content='Explain object-oriented programming concepts.',
-                category='technical',
-                keywords='oop, classes, objects, inheritance',
-                video_path='static/videos/tech_beginner_3.mp4',
-                question_order=3
-            )
-        ]
-        try:
-            for question in test_questions:
+    # Clear existing data
+    Question.query.delete()
+    InterviewerAvatar.query.delete()
+    
+    # Add interviewer avatars
+    avatars = [
+        # Data Structures & Algorithms Specialists
+        {
+            'name': 'Dr. Alex Kumar',
+            'personality': 'analytical',
+            'model_path': 'dsa_expert1.png',
+            'avatar_type': 'dsa_expert',
+            'specialization': 'data_structures_algorithms',
+            'description': 'Algorithm Specialist with 10+ years at top tech companies'
+        },
+        {
+            'name': 'Emily Chen',
+            'personality': 'systematic',
+            'model_path': 'dsa_expert2.png',
+            'avatar_type': 'dsa_expert',
+            'specialization': 'data_structures_algorithms',
+            'description': 'Senior Software Engineer specializing in optimization'
+        },
+        # Data Science Experts
+        {
+            'name': 'Dr. Sarah Chen',
+            'personality': 'analytical',
+            'model_path': 'data_scientist1.png',
+            'avatar_type': 'data_scientist',
+            'specialization': 'data_science',
+            'description': 'Lead Data Scientist with focus on ML/AI'
+        },
+        {
+            'name': 'Dr. Michael Ross',
+            'personality': 'analytical',
+            'model_path': 'data_scientist2.png',
+            'avatar_type': 'data_scientist',
+            'specialization': 'data_science',
+            'description': 'AI Research Scientist with expertise in Deep Learning'
+        },
+        # Data Analysis Professionals
+        {
+            'name': 'Lisa Thompson',
+            'personality': 'detail-oriented',
+            'model_path': 'data_analyst1.png',
+            'avatar_type': 'data_analyst',
+            'specialization': 'data_analysis',
+            'description': 'Senior Data Analyst specializing in Business Intelligence'
+        },
+        {
+            'name': 'David Martinez',
+            'personality': 'analytical',
+            'model_path': 'data_analyst2.png',
+            'avatar_type': 'data_analyst',
+            'specialization': 'data_analysis',
+            'description': 'Data Analytics Manager with focus on Statistical Analysis'
+        },
+        # QA/Testing Experts
+        {
+            'name': 'Maria Garcia',
+            'personality': 'detail-oriented',
+            'model_path': 'qa_engineer1.png',
+            'avatar_type': 'qa_engineer',
+            'specialization': 'software_testing',
+            'description': 'Senior QA Engineer specializing in Automation Testing'
+        },
+        {
+            'name': 'James Wilson',
+            'personality': 'methodical',
+            'model_path': 'qa_engineer2.png',
+            'avatar_type': 'qa_engineer',
+            'specialization': 'software_testing',
+            'description': 'Test Architect with expertise in Security Testing'
+        },
+        # Aptitude Assessment Specialists
+        {
+            'name': 'Dr. Rachel Adams',
+            'personality': 'encouraging',
+            'model_path': 'aptitude_expert1.png',
+            'avatar_type': 'aptitude_expert',
+            'specialization': 'aptitude',
+            'description': 'Cognitive Assessment Specialist'
+        },
+        {
+            'name': 'Prof. Robert Clark',
+            'personality': 'analytical',
+            'model_path': 'aptitude_expert2.png',
+            'avatar_type': 'aptitude_expert',
+            'specialization': 'aptitude',
+            'description': 'Quantitative Reasoning Expert'
+        }
+    ]
+    
+    for avatar_data in avatars:
+        avatar = InterviewerAvatar(**avatar_data)
+        db.session.add(avatar)
+    
+    # Define technical interview topics
+    topics = {
+        'data_structures_algorithms': {
+            'easy': [
+                'Explain the difference between an array and a linked list.',
+                'What is a stack data structure and what are its basic operations?',
+                'How does a queue differ from a stack?',
+                'Explain what is a binary search and when would you use it?',
+                'What is the time complexity of bubble sort?'
+            ],
+            'medium': [
+                'Explain how a hash table works and discuss collision resolution strategies.',
+                'What is a binary search tree and what are its properties?',
+                'Explain the quicksort algorithm and its time complexity.',
+                'What is dynamic programming and when would you use it?',
+                'Describe the difference between DFS and BFS traversal.'
+            ],
+            'hard': [
+                'Explain the A* pathfinding algorithm and its applications.',
+                'What is a red-black tree and how does it maintain balance?',
+                'Describe how you would implement a concurrent hash map.',
+                'Explain the Dijkstra\'s algorithm and its time complexity.',
+                'What are B-trees and how are they used in databases?'
+            ]
+        },
+        'data_science': {
+            'easy': [
+                'What is the difference between supervised and unsupervised learning?',
+                'Explain what a confusion matrix is.',
+                'What is the difference between correlation and causation?',
+                'Explain what feature scaling is and why it\'s important.',
+                'What is the purpose of train-test split in machine learning?'
+            ],
+            'medium': [
+                'Explain the bias-variance tradeoff in machine learning.',
+                'What is regularization and when should you use it?',
+                'Explain the differences between L1 and L2 regularization.',
+                'What is cross-validation and why is it important?',
+                'Explain how decision trees work and their advantages/disadvantages.'
+            ],
+            'hard': [
+                'Explain how LSTM networks work and their advantages over RNNs.',
+                'What is the mathematics behind Support Vector Machines?',
+                'Explain the concept of ensemble learning and various ensemble methods.',
+                'How does the backpropagation algorithm work in neural networks?',
+                'Explain the mathematics behind Principal Component Analysis (PCA).'
+            ]
+        },
+        'data_analysis': {
+            'easy': [
+                'What is the difference between mean, median, and mode?',
+                'Explain what a p-value is in statistics.',
+                'What is the purpose of data cleaning?',
+                'Explain what a box plot tells you about your data.',
+                'What is the difference between qualitative and quantitative data?'
+            ],
+            'medium': [
+                'Explain the concept of statistical significance.',
+                'What are different types of sampling methods?',
+                'How do you handle missing data in a dataset?',
+                'Explain the concept of A/B testing.',
+                'What is the difference between correlation and regression?'
+            ],
+            'hard': [
+                'Explain various time series analysis techniques.',
+                'What is the mathematics behind logistic regression?',
+                'Explain different hypothesis testing methods.',
+                'How would you analyze multivariate data?',
+                'Explain the concept of survival analysis.'
+            ]
+        },
+        'software_testing': {
+            'easy': [
+                'What is the difference between unit testing and integration testing?',
+                'Explain what test-driven development (TDD) is.',
+                'What is regression testing?',
+                'Explain the difference between black box and white box testing.',
+                'What is the purpose of smoke testing?'
+            ],
+            'medium': [
+                'Explain different test automation frameworks.',
+                'What are mocks and stubs in testing?',
+                'How do you approach API testing?',
+                'Explain the concept of test coverage.',
+                'What are different types of performance testing?'
+            ],
+            'hard': [
+                'How would you design a test automation framework from scratch?',
+                'Explain strategies for testing microservices architecture.',
+                'How do you approach security testing?',
+                'What are different strategies for load testing?',
+                'How would you test AI/ML models?'
+            ]
+        },
+        'aptitude': {
+            'easy': [
+                'If a train travels 360 kilometers in 4 hours, what is its speed in kilometers per hour?',
+                'What comes next in the sequence: 2, 4, 8, 16, __?',
+                'If 5 workers can complete a task in 10 days, how many days will it take 2 workers?',
+                'What is 15% of 200?',
+                'If A is twice as old as B, and B is 15 years old, how old is A?'
+            ],
+            'medium': [
+                'A car depreciates 20% annually. If it costs $10,000 now, what will be its value after 2 years?',
+                'If 8 machines can produce 96 items in 12 hours, how many machines are needed to produce 144 items in 8 hours?',
+                'Find the next number in the series: 3, 8, 15, 24, __',
+                'A mixture of 60 liters has water and milk in ratio 2:1. How many liters of milk should be added to make the ratio 1:1?',
+                'If the probability of an event occurring is 0.4, what is the probability of it not occurring?'
+            ],
+            'hard': [
+                'Two trains start at the same time from stations A and B, 400 km apart. If train 1 travels at 80 km/h and train 2 at 70 km/h, after how many hours will they meet?',
+                'In how many ways can 7 people be seated around a circular table?',
+                'If log(x) + log(y) = log(xy), prove that log(x^n) = n*log(x)',
+                'A boat travels 24 km upstream in 6 hours and the same distance downstream in 4 hours. Find the speed of the stream.',
+                'Three unbiased coins are tossed simultaneously. What is the probability of getting at least two heads?'
+            ]
+        }
+    }
+    
+    # Add questions to database
+    for topic, difficulties in topics.items():
+        for difficulty, questions in difficulties.items():
+            for content in questions:
+                question = Question(
+                    topic=topic,
+                    difficulty=difficulty,
+                    content=content,
+                    category='technical' if topic != 'aptitude' else 'aptitude'
+                )
                 db.session.add(question)
-            db.session.commit()
-            print("Successfully added test questions")
-        except Exception as e:
-            print(f"Error adding test questions: {str(e)}")
-            db.session.rollback()
+                db.session.commit()
+    
+    db.session.commit()
+    print("Database initialized with technical interview topics and avatars!")
 
-# Form classes
+# Login required decorator
+def login_required(f):
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            flash('Please log in first.', 'error')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    decorated_function.__name__ = f.__name__
+    return decorated_function
+
+# Context processors
+@app.context_processor
+def inject_user():
+    if 'user_id' in session:
+        user = User.query.get(session['user_id'])
+        return dict(user=user)
+    return dict(user=None)
+
+@app.context_processor
+def inject_current_year():
+    return {'current_year': datetime.now().year}
+
+# Form Classes
 class InterviewForm(FlaskForm):
-    topic = SelectField('Topic', choices=[
-        ('technology', 'Technology'),
-        ('behavioral', 'Behavioral'),
-        ('leadership', 'Leadership')
-    ], validators=[DataRequired()])
-    
-    difficulty = SelectField('Difficulty', choices=[
-        ('beginner', 'Beginner'),
-        ('intermediate', 'Intermediate'),
-        ('advanced', 'Advanced')
-    ], validators=[DataRequired()])
-    
-    num_interviewers = SelectField('Number of Interviewers', 
-        choices=[(1, '1'), (2, '2'), (3, '3')],
-        coerce=int,
-        validators=[DataRequired()])
-    
+    topic = SelectField('Select Topic', validators=[DataRequired()])
+    difficulty = SelectField('Select Difficulty', validators=[DataRequired()], choices=[
+        ('easy', 'Easy'),
+        ('medium', 'Medium'),
+        ('hard', 'Hard')
+    ])
+    num_interviewers = SelectField('Number of Interviewers', validators=[DataRequired()], choices=[
+        ('1', '1 Interviewer'),
+        ('2', '2 Interviewers'),
+        ('3', '3 Interviewers')
+    ])
     submit = SubmitField('Start Interview')
 
-app.config['UPLOAD_FOLDER'] = 'recordings'
-
-# Ensure upload directory exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'videos')
-ALLOWED_EXTENSIONS = {'mp4', 'webm', 'mov'}
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024  # 64MB max file size
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
+# Routes
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -137,14 +340,14 @@ def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        user = User.query.filter_by(username=username).first()
         
+        user = User.query.filter_by(username=username).first()
         if user and check_password_hash(user.password_hash, password):
             session['user_id'] = user.id
+            flash('Logged in successfully!', 'success')
             return redirect(url_for('dashboard'))
-            
-        return render_template('login.html', error="Invalid username or password")
-    
+        
+        flash('Invalid username or password', 'error')
     return render_template('login.html')
 
 @app.route('/signup', methods=['GET', 'POST'])
@@ -158,10 +361,12 @@ def signup():
         education = request.form.get('education')
         
         if User.query.filter_by(username=username).first():
-            return render_template('signup.html', error="Username already exists")
-            
+            flash('Username already exists', 'error')
+            return redirect(url_for('signup'))
+        
         if User.query.filter_by(email=email).first():
-            return render_template('signup.html', error="Email already registered")
+            flash('Email already registered', 'error')
+            return redirect(url_for('signup'))
         
         user = User(
             username=username,
@@ -176,14 +381,15 @@ def signup():
         db.session.commit()
         
         session['user_id'] = user.id
+        flash('Account created successfully!', 'success')
         return redirect(url_for('dashboard'))
-        
+    
     return render_template('signup.html')
 
 @app.route('/logout')
-@login_required
 def logout():
     session.pop('user_id', None)
+    flash('Logged out successfully!', 'success')
     return redirect(url_for('index'))
 
 @app.route('/dashboard')
@@ -196,110 +402,134 @@ def dashboard():
 @app.route('/start-interview', methods=['GET', 'POST'])
 @login_required
 def start_interview():
-    try:
-        form = InterviewForm()
+    form = InterviewForm()
+    
+    # Get available topics for dropdown
+    topics = db.session.query(Question.topic).distinct().all()
+    form.topic.choices = [(topic[0], topic[0].replace('_', ' ').title()) for topic in topics]
+    
+    if request.method == 'POST':
+        topic = request.form.get('topic')
+        difficulty = request.form.get('difficulty')
+        num_interviewers = int(request.form.get('num_interviewers', 1))
         
-        if request.method == 'GET':
-            return render_template('start_interview.html', form=form)
+        if not all([topic, difficulty]):
+            flash('Please fill in all required fields', 'error')
+            return redirect(url_for('start_interview'))
         
-        if request.method == 'POST':
-            if form.validate_on_submit():
-                # Create new interview
-                interview = Interview(
-                    user_id=session['user_id'],
-                    topic=form.topic.data,
-                    difficulty=form.difficulty.data,
-                    num_interviewers=form.num_interviewers.data,
-                    status='pending',
-                    start_time=datetime.utcnow()
-                )
-                
-                db.session.add(interview)
-                db.session.commit()
-                
-                # Store interview ID in session
-                session['interview_id'] = interview.id
-                
-                flash('Interview created successfully!', 'success')
-                return redirect(url_for('interview_room', interview_id=interview.id))
-            else:
-                for field, errors in form.errors.items():
-                    for error in errors:
-                        flash(f'{getattr(form, field).label.text}: {error}', 'danger')
-                return render_template('start_interview.html', form=form)
-            
-    except Exception as e:
-        print(f"Error in start_interview: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        flash('An error occurred while creating the interview.', 'danger')
-        return redirect(url_for('dashboard'))
+        # Create new interview
+        interview = Interview(
+            user_id=session['user_id'],
+            topic=topic,
+            difficulty=difficulty,
+            num_interviewers=num_interviewers,
+            start_time=datetime.now(),
+            current_question=0  # Start with the first question
+        )
+        
+        # Get questions for this topic and difficulty
+        questions = Question.query.filter_by(
+            topic=topic,
+            difficulty=difficulty
+        ).all()
+        
+        if not questions:
+            flash('No questions available for this topic and difficulty', 'error')
+            return redirect(url_for('start_interview'))
+        
+        # Assign questions to interview
+        for i, question in enumerate(questions, 1):
+            question.question_order = i
+            interview.questions.append(question)
+        
+        db.session.add(interview)
+        db.session.commit()
+        
+        return redirect(url_for('interview_room', interview_id=interview.id))
+    
+    return render_template('start_interview.html', form=form)
 
 @app.route('/interview-room/<int:interview_id>')
 @login_required
 def interview_room(interview_id):
-    try:
-        # Get the interview
-        interview = Interview.query.get_or_404(interview_id)
-        
-        # Check if the user owns this interview
-        if interview.user_id != session['user_id']:
-            flash('You do not have permission to access this interview.', 'danger')
-            return redirect(url_for('dashboard'))
-        
-        # Update interview status if needed
-        if interview.status == 'pending':
-            interview.status = 'in_progress'
-            interview.start_time = datetime.utcnow()
-            db.session.commit()
-        
-        # Get or create interviewer based on topic
-        interviewer = InterviewerAvatar.query.filter_by(specialization=interview.topic).first()
-        if not interviewer:
-            interviewer = InterviewerAvatar(
-                name=f'{interview.topic.title()} Expert',
-                avatar_type='professional',
-                specialization=interview.topic,
-                personality='professional',
-                model_path='interviewer1.jpg',
-                voice_id='en-US-Neural2-D',
-                description=f'Expert {interview.topic.title()} Interviewer'
-            )
-            db.session.add(interviewer)
-            db.session.commit()
-        
-        # Get first question
-        question = Question.query.filter_by(
+    interview = Interview.query.get_or_404(interview_id)
+    
+    # Ensure the interview belongs to the current user
+    if interview.user_id != session['user_id']:
+        flash('Access denied', 'error')
+        return redirect(url_for('dashboard'))
+    
+    # Get an interviewer avatar specialized in the interview topic
+    interviewer = InterviewerAvatar.query.filter_by(specialization=interview.topic).first()
+    if not interviewer:
+        # Fallback to any available interviewer if no specialist is found
+        interviewer = InterviewerAvatar.query.first()
+    
+    # Get the current question
+    current_question = None
+    if interview.questions:
+        # Get question by order number
+        current_question = Question.query.filter_by(
             topic=interview.topic,
             difficulty=interview.difficulty
-        ).filter_by(question_order=1).first()
+        ).filter(Question.question_order == (interview.current_question + 1)).first()
+    
+    if not current_question and interview.questions:
+        # Fallback: get the first question if no current question
+        current_question = interview.questions[0]
+    
+    return render_template('interview_room.html',
+                           interview=interview,
+                           interviewer=interviewer,
+                           current_question=current_question)
+
+@app.route('/upload-video/<int:question_id>', methods=['POST'])
+@login_required
+def upload_video_endpoint(question_id):
+    question = Question.query.get_or_404(question_id)
+    
+    if 'video' not in request.files:
+        return jsonify({'error': 'No video file'}), 400
+    
+    video = request.files['video']
+    if video.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
+    if video:
+        # Create upload directory if it doesn't exist
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
         
-        if not question:
-            question = Question(
-                topic=interview.topic,
-                difficulty=interview.difficulty,
-                content=f'Tell me about your experience with {interview.topic}.',
-                category='general',
-                keywords=f'{interview.topic}, experience',
-                video_path='static/videos/default.mp4',
-                question_order=1
-            )
-            db.session.add(question)
-            db.session.commit()
+        # Save video with unique filename
+        filename = f"{session['user_id']}_{question_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.webm"
+        video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        video.save(video_path)
         
-        return render_template('interview_room.html', 
-                             interview=interview,
-                             interviewer=interviewer,
-                             topic=interview.topic,
-                             difficulty=interview.difficulty,
-                             current_question=question)
-                             
-    except Exception as e:
-        print(f"Error in interview_room: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        flash('An error occurred while loading the interview room.', 'danger')
-        return redirect(url_for('dashboard'))
+        # Update question with video path
+        question.video_path = filename
+        db.session.commit()
+        
+        return jsonify({'success': True, 'video_path': filename})
+    
+    return jsonify({'error': 'Invalid file format'}), 400
+
+@app.route('/delete-video/<int:question_id>', methods=['POST'])
+@login_required
+def delete_video_endpoint(question_id):
+    question = Question.query.get_or_404(question_id)
+    
+    if question.video_path:
+        # Delete video file
+        video_path = os.path.join(app.config['UPLOAD_FOLDER'], question.video_path)
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        
+        # Clear video path in database
+        question.video_path = None
+        db.session.commit()
+        
+        return jsonify({'success': True})
+    
+    return jsonify({'error': 'No video found'}), 404
 
 @app.route('/test-interview-room')
 def test_interview_room():
@@ -594,100 +824,87 @@ def save_recording():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/upload-video', methods=['GET', 'POST'])
+@app.route('/manage-questions')
 @login_required
-def upload_video():
-    if request.method == 'POST':
-        if 'video' not in request.files:
-            flash('No video file uploaded', 'danger')
-            return redirect(request.url)
-            
-        video = request.files['video']
-        question_id = request.form.get('question_id')
-        
-        if video.filename == '':
-            flash('No video selected', 'danger')
-            return redirect(request.url)
-            
-        if not question_id:
-            flash('No question selected', 'danger')
-            return redirect(request.url)
-            
-        if video and allowed_file(video.filename):
-            try:
-                # Secure the filename and save the file
-                filename = secure_filename(video.filename)
-                video_path = os.path.join('videos', filename)
-                full_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                video.save(full_path)
-                
-                # Update the question with the video path
-                question = Question.query.get(question_id)
-                if question:
-                    question.video_path = video_path
-                    db.session.commit()
-                    flash('Video uploaded successfully!', 'success')
-                else:
-                    flash('Question not found', 'danger')
-                
-                return jsonify({
-                    'success': True,
-                    'message': 'Video uploaded successfully',
-                    'video_path': video_path
-                })
-                
-            except Exception as e:
-                print(f"Error uploading video: {str(e)}")
-                return jsonify({
-                    'success': False,
-                    'message': 'Error uploading video'
-                }), 500
-                
-        return jsonify({
-            'success': False,
-            'message': 'Invalid file type'
-        }), 400
-        
-    # GET request - render upload form
+def manage_questions():
     questions = Question.query.all()
-    return render_template('upload_video.html', questions=questions)
+    return render_template('manage_questions.html', questions=questions)
 
-@app.route('/delete-video/<int:question_id>', methods=['POST'])
+@app.route('/add-question', methods=['GET', 'POST'])
 @login_required
-def delete_video(question_id):
-    try:
-        question = Question.query.get_or_404(question_id)
+def add_question():
+    if request.method == 'POST':
+        topic = request.form.get('topic')
+        difficulty = request.form.get('difficulty')
+        content = request.form.get('content')
+        category = request.form.get('category')
+        video = request.files.get('video')
         
-        if question.video_path:
-            # Delete the video file
-            video_path = os.path.join(app.config['UPLOAD_FOLDER'], os.path.basename(question.video_path))
-            if os.path.exists(video_path):
-                os.remove(video_path)
-            
-            # Clear the video path in the database
-            question.video_path = None
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': 'Video deleted successfully'
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'No video found for this question'
-            }), 404
-            
-    except Exception as e:
-        print(f"Error deleting video: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': 'Error deleting video'
-        }), 500
+        if not all([topic, difficulty, content, category, video]):
+            flash('All fields are required', 'error')
+            return redirect(url_for('add_question'))
+        
+        # Save video
+        interviewer_videos_dir = os.path.join('static', 'interviewer_videos')
+        os.makedirs(interviewer_videos_dir, exist_ok=True)
+        filename = f"interviewer_{secure_filename(video.filename)}"
+        video_path = os.path.join(interviewer_videos_dir, filename)
+        video.save(video_path)
+        
+        # Create question
+        question = Question(
+            topic=topic,
+            difficulty=difficulty,
+            content=content,
+            category=category,
+            interviewer_video_path=os.path.join('interviewer_videos', filename)
+        )
+        
+        db.session.add(question)
+        db.session.commit()
+        
+        flash('Question added successfully', 'success')
+        return redirect(url_for('manage_questions'))
+    
+    return render_template('add_question.html')
+
+@app.route('/upload-interviewer-video/<int:question_id>', methods=['POST'])
+@login_required
+def upload_interviewer_video(question_id):
+    question = Question.query.get_or_404(question_id)
+
+    if 'video' not in request.files:
+        flash('No video file uploaded', 'error')
+        return redirect(url_for('manage_questions'))
+
+    video = request.files['video']
+    if video.filename == '':
+        flash('No selected file', 'error')
+        return redirect(url_for('manage_questions'))
+
+    if video:
+        # Create upload directory if it doesn't exist
+        interviewer_videos_dir = os.path.join('static', 'interviewer_videos')
+        os.makedirs(interviewer_videos_dir, exist_ok=True)
+
+        # Save video with unique filename
+        filename = f"interviewer_{question_id}_{secure_filename(video.filename)}"
+        video_path = os.path.join(interviewer_videos_dir, filename)
+        video.save(video_path)
+
+        # Update question with video path
+        question.interviewer_video_path = os.path.join('interviewer_videos', filename)
+        db.session.commit()
+
+        flash('Video uploaded successfully', 'success')
+    else:
+        flash('Invalid file format', 'error')
+
+    return redirect(url_for('manage_questions'))
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    return send_file(f'static/{filename}')
+    return send_file(os.path.join('static', filename))
 
 @app.template_filter('avg')
 def avg_filter(lst, attribute=None):
@@ -700,4 +917,14 @@ def avg_filter(lst, attribute=None):
     return sum(values) / len(values) if values else 0
 
 if __name__ == '__main__':
+    print('Starting application in dry-run mode...')
+    print('Configuration:')
+    print(f"Database URI: {app.config['SQLALCHEMY_DATABASE_URI']}")
+    print(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
+    print('\nAvailable routes:')
+    for rule in app.url_map.iter_rules():
+        print(f"- {rule.endpoint}: {rule.methods} {rule}")
+    print('\nDry run completed successfully.')
+    
+    # Start the application
     app.run(debug=True)
